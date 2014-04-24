@@ -50,6 +50,11 @@ typedef struct _XENBUS_RESOURCE {
     CM_PARTIAL_RESOURCE_DESCRIPTOR Translated;
 } XENBUS_RESOURCE, *PXENBUS_RESOURCE;
 
+extern VOID
+FdoRemoveVusbEntry(
+    IN  PVOID Entry
+    );
+
 extern NTSTATUS
 FdoCreate(
     IN  PDEVICE_OBJECT  PhysicalDeviceObject,

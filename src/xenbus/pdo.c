@@ -66,6 +66,9 @@ struct _XENBUS_PDO {
     PXENBUS_FDO                 Fdo;
     BOOLEAN                     Missing;
     const CHAR                  *Reason;
+    BOOLEAN                     VusbDevice;
+    PLIST_ENTRY                 VusbListEntry;
+    USHORT                      DeviceId;
 
     BUS_INTERFACE_STANDARD      BusInterface;
 
@@ -73,6 +76,15 @@ struct _XENBUS_PDO {
 
     PXENBUS_SUSPEND_CALLBACK    SuspendCallbackLate;
 };
+
+FORCEINLINE VOID
+PdoSetVusbListEntry(
+    IN  PXENBUS_PDO  Pdo,
+    PLIST_ENTRY      VusbListEntry
+    )
+{
+    Pdo->VusbListEntry = VusbListEntry;
+}
 
 static FORCEINLINE PVOID
 __PdoAllocate(
@@ -264,6 +276,7 @@ static struct _REVISION_ENTRY PdoRevisionTable[] = {
     { "VIF", 1 },
     { "VBD", 1 },
     { "IFACE", 1 },
+    { "VUSB", 2 },
     { NULL, 0 }
 };
 
@@ -350,6 +363,14 @@ __PdoGetVendorName(
     )
 {
     return FdoGetVendorName(__PdoGetFdo(Pdo));
+}
+
+USHORT
+PdoGetInstanceId(
+    IN PXENBUS_PDO Pdo
+    )
+{
+    return Pdo->DeviceId;
 }
 
 static FORCEINLINE PXENBUS_EVTCHN_INTERFACE
@@ -1621,13 +1642,27 @@ PdoQueryId(
     case BusQueryInstanceID:
         Type = REG_SZ;
 
-        RtlAppendUnicodeToString(&Id, L"_");
+        if (Pdo->VusbDevice) {
+            status = RtlStringCbPrintfW(Buffer,
+                                    MAX_DEVICE_ID_LEN,
+                                    L"%04u",
+                                    Pdo->DeviceId);
+            Buffer += wcslen(Buffer);
+        }
+        else
+            RtlAppendUnicodeToString(&Id, L"_");
         break;
 
     case BusQueryDeviceID:
         Type = REG_SZ;
 
-        status = RtlStringCbPrintfW(Buffer,
+        if (Pdo->VusbDevice)
+            status = RtlStringCbPrintfW(Buffer,
+                                    MAX_DEVICE_ID_LEN,
+                                    L"XEN\\%hs",
+                                    __PdoGetName(Pdo));
+        else
+            status = RtlStringCbPrintfW(Buffer,
                                     MAX_DEVICE_ID_LEN,
                                     L"XENBUS\\VEN_%hs&DEV_%hs&REV_%08X",
                                     __PdoGetVendorName(Pdo),
@@ -1646,7 +1681,13 @@ PdoQueryId(
         Type = REG_MULTI_SZ;
 
         Length = MAX_DEVICE_ID_LEN;
-        status = RtlStringCbPrintfW(Buffer,
+        if (Pdo->VusbDevice)
+            status = RtlStringCbPrintfW(Buffer,
+                                    Length,
+                                    L"XEN\\%hs",
+                                    __PdoGetName(Pdo));
+        else
+            status = RtlStringCbPrintfW(Buffer,
                                     Length,
                                     L"XENBUS\\VEN_%hs&DEV_%hs&REV_%08X",
                                     __PdoGetVendorName(Pdo),
@@ -2249,7 +2290,10 @@ PdoSuspend(
 NTSTATUS
 PdoCreate(
     IN  PXENBUS_FDO     Fdo,
-    IN  PANSI_STRING    Name
+    IN  PANSI_STRING    Name,
+    IN  USHORT          DeviceId,
+    IN  BOOLEAN         IsVusbDevice,
+    OUT PXENBUS_PDO     *NewPdo
     )
 {
     PDEVICE_OBJECT      PhysicalDeviceObject;
@@ -2300,9 +2344,20 @@ PdoCreate(
     if (!NT_SUCCESS(status))
         goto fail5;
 
-    Info("%p (%s)\n",
-         PhysicalDeviceObject,
-         __PdoGetName(Pdo));
+    Pdo->VusbDevice = IsVusbDevice;
+    Pdo->DeviceId = DeviceId;
+
+    if (Pdo->VusbDevice) {
+        *NewPdo = Pdo;
+        Info("%p (XEN\\%s) [Instance %d]\n",
+             PhysicalDeviceObject,
+             __PdoGetName(Pdo),
+             Pdo->DeviceId);
+    }
+    else
+        Info("%p (%s)\n",
+             PhysicalDeviceObject,
+             __PdoGetName(Pdo));
 
     Dx->Pdo = Pdo;
     PhysicalDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
@@ -2359,10 +2414,26 @@ PdoDestroy(
 
     __PdoUnlink(Pdo);
 
-    Info("%p (%s) (%s)\n",
-         PhysicalDeviceObject,
-         __PdoGetName(Pdo),
-         Pdo->Reason);
+    if (Pdo->VusbDevice)
+    {
+        Info("%p (XEN\\%s) [Instance %d] (%s)\n",
+            PhysicalDeviceObject,
+            __PdoGetName(Pdo),
+            Pdo->DeviceId,
+            Pdo->Reason);
+
+        if (Pdo->VusbListEntry)
+        {
+            FdoRemoveVusbEntry(Pdo->VusbListEntry);
+        }
+    }
+    else
+    {
+        Info("%p (%s) (%s)\n",
+            PhysicalDeviceObject,
+            __PdoGetName(Pdo),
+            Pdo->Reason);
+    }
     Pdo->Reason = NULL;
 
     Dx->Pdo = NULL;
@@ -2378,6 +2449,8 @@ PdoDestroy(
     Pdo->SystemPowerThread = NULL;
 
     Pdo->Dx = NULL;
+    Pdo->VusbDevice = FALSE;
+    Pdo->DeviceId = 0;
 
     ASSERT(IsZeroMemory(Pdo, sizeof (XENBUS_PDO)));
     __PdoFree(Pdo);

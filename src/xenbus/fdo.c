@@ -62,6 +62,16 @@
 
 #define MAXNAMELEN  128
 
+static FORCEINLINE PANSI_STRING
+__FdoMultiSzToUpcaseAnsi(
+    IN  PCHAR       Buffer
+    );
+
+static FORCEINLINE VOID
+__FdoFreeAnsi(
+    IN  PANSI_STRING    Ansi
+    );
+
 struct _XENBUS_FDO {
     PXENBUS_DX                      Dx;
     PDEVICE_OBJECT                  LowerDeviceObject;
@@ -105,7 +115,47 @@ struct _XENBUS_FDO {
 
     PXENBUS_EVTCHN_DESCRIPTOR       Evtchn;
     PXENBUS_SUSPEND_CALLBACK        SuspendCallbackLate;
+
+    LIST_ENTRY                      VusbInstanceList;
 };
+
+typedef struct
+{
+    LIST_ENTRY          ListEntry;
+    ULONG               InstanceId;
+    PXENBUS_FDO         Fdo;
+    PXENBUS_PDO         Pdo;
+    BOOLEAN             Present;
+    PCHAR               BackendPath;
+    PXENBUS_STORE_WATCH VusbWatch;
+}
+VUSB_ENTRY, *PVUSB_ENTRY;
+
+FORCEINLINE VOID
+FdoRemoveVusbEntry(
+    IN  PVOID Entry
+    )
+{
+    PLIST_ENTRY VusbListEntry;
+    PVUSB_ENTRY VusbEntry;
+
+    VusbListEntry = (PLIST_ENTRY)Entry;
+    VusbEntry = CONTAINING_RECORD(VusbListEntry, VUSB_ENTRY, ListEntry);
+    
+    if (VusbEntry->VusbWatch)
+    {
+        Trace("Stopping watch on %s\n", VusbEntry->BackendPath);
+        STORE(Unwatch, &VusbEntry->Fdo->StoreInterface, VusbEntry->VusbWatch);
+        VusbEntry->VusbWatch = NULL;
+    }
+    
+    if (VusbEntry->BackendPath)
+        ExFreePool (VusbEntry->BackendPath);
+    
+    Trace("Removing Vusb list entry %p\n", VusbEntry);
+    RemoveEntryList(VusbListEntry);
+    ExFreePool(VusbEntry);
+}
 
 static FORCEINLINE PVOID
 __FdoAllocate(
@@ -593,6 +643,348 @@ FdoReleaseMutex(
         FdoDestroy(Fdo);
 }
 
+#define XENBUS_STATE_INVALID 0
+#define XENBUS_STATE_CONNECTED 4
+#define XENBUS_STATE_CLOSING 5
+#define XENBUS_STATE_CLOSED 6
+
+ULONG
+ReadBackendDeviceState(
+IN PXENBUS_FDO Fdo,
+PVUSB_ENTRY VusbEntry
+)
+{
+    NTSTATUS status;
+    PCHAR Buffer;
+    ULONG State = XENBUS_STATE_INVALID;
+    CHAR FrontendPath[32];
+    PCHAR BackendPath;
+
+    Trace("Entering...\n");
+
+    status = RtlStringCbPrintfA(FrontendPath,
+        sizeof(FrontendPath),
+        "device/vusb/%u",
+        VusbEntry->InstanceId);
+
+    if (NT_SUCCESS(status))
+    {
+        Trace(" FrontendPath = %s\n", FrontendPath);
+
+        status = STORE(Read,
+            &Fdo->StoreInterface,
+            NULL,
+            FrontendPath,
+            "backend",
+            &BackendPath);
+
+        if (NT_SUCCESS(status))
+        {
+            Trace(" BackendPath = %s\n", BackendPath);
+
+            if (VusbEntry->BackendPath)
+            {
+                if (strcmp(VusbEntry->BackendPath, BackendPath) != 0)
+                {
+                    ExFreePool (VusbEntry->BackendPath);
+                    VusbEntry->BackendPath = (PCHAR)ExAllocatePoolWithTag(NonPagedPool, strlen(BackendPath)+1, 'SUBX');
+                }
+            }
+            else
+            {
+                VusbEntry->BackendPath = (PCHAR)ExAllocatePoolWithTag(NonPagedPool, strlen(BackendPath)+1, 'SUBX');
+            }
+            if (VusbEntry->BackendPath)
+            {
+                //
+                // Save the backend path in the VUsb entry
+                //
+                RtlStringCbCopyA (VusbEntry->BackendPath, strlen(BackendPath)+1, BackendPath);
+
+                status = STORE(Read,
+                    &Fdo->StoreInterface,
+                    NULL,
+                    BackendPath,
+                    "state",
+                    &Buffer);
+
+                STORE(Free,
+                    &Fdo->StoreInterface,
+                    BackendPath);
+
+                if (NT_SUCCESS(status))
+                {
+                    State = strtol(Buffer, NULL, 10);
+                    Trace(" Backend state = \"%s\" (%d)\n", Buffer, State);
+                    STORE(Free,
+                        &Fdo->StoreInterface,
+                        Buffer);
+                }
+                else
+                {
+                    Error("XenStoreRead() call to read backend state failed\n");
+                    State = 255;
+                }
+            }
+            else
+            {
+                Error("Failed to allocate memory for BackendPath\n");
+                State = 255;
+            }
+        }
+        else
+        {
+            Error("XenStoreRead() call to read backend path failed\n");
+            State = 255;
+        }
+    }
+    else
+    {
+        Error("RtlStringCbPrintf() call failed\n");
+        State = 255;
+    }
+
+    Trace("Exiting.\n");
+    return State;
+}
+
+ULONG
+__ReadFrontendDeviceState(
+    IN PXENBUS_FDO Fdo,
+    ULONG InstanceId
+    )
+{
+    NTSTATUS status;
+    PCHAR Buffer;
+    ULONG State = XENBUS_STATE_INVALID;
+    CHAR FrontendPath[32];
+
+    Trace("Entering __ReadFrontendDeviceState()\n");
+
+    status = RtlStringCbPrintfA(FrontendPath,
+        sizeof(FrontendPath),
+        "device/vusb/%u",
+        InstanceId);
+
+    if (NT_SUCCESS(status))
+    {
+        Trace(" FrontendPath = %s\n", FrontendPath);
+
+        status = STORE(Read,
+            &Fdo->StoreInterface,
+            NULL,
+            FrontendPath,
+            "state",
+            &Buffer);
+
+        if (NT_SUCCESS(status))
+        {
+            State = strtol(Buffer, NULL, 10);
+            Trace(" Frontend state = \"%s\" (%d)\n", Buffer, State);
+            STORE(Free,
+                &Fdo->StoreInterface,
+                Buffer);
+        }
+        else
+        {
+            Error("XenStoreRead() call to read Frontend state failed\n");
+        }
+    }
+    else
+    {
+        Error("RtlStringCbPrintf() call failed\n");
+    }
+
+    Trace("Exiting __ReadFrontendDeviceState()\n");
+    return State;
+}
+
+BOOLEAN
+__FdoEnumerateVusbDevices(
+    IN  PXENBUS_FDO     Fdo
+    )
+{
+    PLIST_ENTRY         Entry;
+    PCHAR               Buffer;
+    PANSI_STRING        XenstoreList;
+    NTSTATUS            status;
+    ULONG               Index;
+    BOOLEAN             NeedInvalidate;
+
+    NeedInvalidate = FALSE;
+    XenstoreList = NULL;
+
+    // Get a snapshot of the device/vusb area in xenstore
+
+    status = STORE(Directory,
+        &Fdo->StoreInterface,
+        NULL,
+        "device",
+        "vusb",
+        &Buffer);
+
+    if (NT_SUCCESS(status))
+    {
+        XenstoreList = __FdoMultiSzToUpcaseAnsi(Buffer);
+        STORE(Free,
+            &Fdo->StoreInterface,
+            Buffer);
+    }
+
+    // Take the Xenstore list to find any Pdos to delete
+
+    Entry = Fdo->VusbInstanceList.Flink;
+    if (XenstoreList)
+    {
+        // Walk the device list in the Fdo looking for the Vusb instance
+        while (Entry != &Fdo->VusbInstanceList)
+        {
+            PVUSB_ENTRY VusbEntry = CONTAINING_RECORD(Entry, VUSB_ENTRY, ListEntry);
+            PLIST_ENTRY VusbNext = Entry->Flink;
+            PANSI_STRING XsDevice;
+            BOOLEAN Missing;
+            BOOLEAN Found = FALSE;
+
+            VusbEntry->Present = FALSE; // Reset it to 'missing'
+            Missing = TRUE;
+            for (Index = 0; (XenstoreList[Index].Buffer != NULL) && !Found; Index++)
+            {
+                XsDevice = &XenstoreList[Index];
+                if (VusbEntry->InstanceId == (ULONG)atoi(XsDevice->Buffer))
+                {
+                    ULONG BackendState = ReadBackendDeviceState(Fdo, VusbEntry);
+                    //
+                    // Check the state node for the device to be sure it is not closing
+                    //
+                    if ((__ReadFrontendDeviceState(Fdo, VusbEntry->InstanceId) == XENBUS_STATE_CONNECTED) &&
+                        ((BackendState == XENBUS_STATE_CLOSING) || (BackendState == XENBUS_STATE_CLOSED)))
+                    {
+                        //
+                        // Frontend state = Connected, Backend = Closing or Closed...
+                        //
+                        // Device Transitioned to closing or closed
+                        //
+                        Info("Device \"%s\\%d\" being removed by backend!!\n", "VUSB", VusbEntry->InstanceId);
+                        PdoSetDevicePnpState(VusbEntry->Pdo, SurpriseRemovePending);
+                    }
+                    else
+                    {
+                        VusbEntry->Present = TRUE;
+                        Missing = FALSE;   // Present in Xenstore
+                    }
+                    // Since we found the device, stop looking any further
+                    Found = TRUE;
+                }
+            }
+
+            if (Missing &&
+                !PdoIsMissing(VusbEntry->Pdo) &&
+                PdoGetDevicePnpState(VusbEntry->Pdo) != Deleted)
+            {
+                PdoSetMissing(VusbEntry->Pdo, "device disappeared");
+
+                if (PdoGetDevicePnpState(VusbEntry->Pdo) == Present) {
+                    PdoSetDevicePnpState(VusbEntry->Pdo, Deleted);
+                    PdoDestroy(VusbEntry->Pdo);
+                }
+                else {
+                    NeedInvalidate = TRUE;
+                }
+            }
+
+            Entry = VusbNext;
+        }
+    }
+
+    // Find any new Vusb devices to create new Pdos
+
+    if (XenstoreList)
+    {
+        for (Index = 0; XenstoreList[Index].Buffer != NULL; Index++)
+        {
+            PVUSB_ENTRY VusbEntry;
+            PANSI_STRING VusbDevice = &XenstoreList[Index];
+            BOOLEAN MakePdo = TRUE;
+            USHORT InstanceId = (USHORT)(atoi(VusbDevice->Buffer));
+            BOOLEAN Found = FALSE;
+
+            Entry = Fdo->VusbInstanceList.Flink;
+            while ((Entry != &Fdo->VusbInstanceList) && !Found)
+            {
+                PLIST_ENTRY Next = Entry->Flink;
+                VusbEntry = CONTAINING_RECORD(Entry, VUSB_ENTRY, ListEntry);
+                if ((ULONG)(InstanceId) == VusbEntry->InstanceId)
+                {
+                    if (PdoGetDevicePnpState(VusbEntry->Pdo) == SurpriseRemovePending)
+                    {
+                        //
+                        // The backend node is gone...not transitioned to state closing or closed.
+                        //
+                        NeedInvalidate = TRUE;
+                        PdoSetDevicePnpState(VusbEntry->Pdo, Deleted);
+                        PdoDestroy(VusbEntry->Pdo);
+                    }
+                    MakePdo = FALSE;
+                    Found = TRUE;
+                }
+                Entry = Next;
+            }
+            if (MakePdo)
+            {
+                ANSI_STRING Class;
+                RtlInitAnsiString(&Class, "VUSB");
+                Info("Calling CreatePdo for \"%s\\%d\"\n", "VUSB", InstanceId);
+                VusbEntry = (PVUSB_ENTRY)ExAllocatePoolWithTag(NonPagedPool, (sizeof(VUSB_ENTRY)), 'SUBX');
+                if (VusbEntry)
+                {
+                    RtlZeroMemory (VusbEntry, sizeof(VUSB_ENTRY));
+                    status = PdoCreate(Fdo, &Class, InstanceId, TRUE, &VusbEntry->Pdo);
+                    if (NT_SUCCESS(status))
+                    {
+                        NeedInvalidate = TRUE;
+                        VusbEntry->InstanceId = (ULONG)InstanceId;
+                        VusbEntry->Fdo = Fdo;
+                        InsertTailList(&Fdo->VusbInstanceList, &VusbEntry->ListEntry);
+                        PdoSetVusbListEntry(VusbEntry->Pdo, &VusbEntry->ListEntry);
+                        //
+                        // Call once to update the backend path
+                        //
+                        ReadBackendDeviceState(Fdo, VusbEntry);
+                        //
+                        // Now create the watch
+                        //
+                        status = STORE(Watch,
+                            &Fdo->StoreInterface,
+                            NULL,
+                            VusbEntry->BackendPath,
+                            ThreadGetEvent(Fdo->ScanThread),
+                            &VusbEntry->VusbWatch);
+                        if (!NT_SUCCESS(status))
+                        {
+                            Error("Failed to create watch on %s\n", VusbEntry->BackendPath);
+                            if (VusbEntry->BackendPath)
+                                ExFreePool (VusbEntry->BackendPath);
+                        }
+                    }
+                    else
+                    {
+                        Error("PdoCreate() \\VUSB\\%d FAILED: 0x%08x\n", InstanceId, status);
+                        ExFreePool (VusbEntry);
+                    }
+                }
+            }
+        }
+
+        if (XenstoreList != NULL)
+        {
+            __FdoFreeAnsi(XenstoreList);
+        }
+    }
+
+    return NeedInvalidate;
+
+}
+
 static FORCEINLINE BOOLEAN
 __FdoEnumerate(
     IN  PXENBUS_FDO     Fdo,
@@ -677,14 +1069,17 @@ __FdoEnumerate(
     for (Index = 0; Classes[Index].Buffer != NULL; Index++) {
         PANSI_STRING Class = &Classes[Index];
 
-        if (Class->Length != 0) {
+        if ((Class->Length != 0) &&
+            (strcmp(Class->Buffer, "VUSB") != 0)) {
             NTSTATUS    status;
 
-            status = PdoCreate(Fdo, Class);
+            status = PdoCreate(Fdo, Class, 0, FALSE, NULL);
             if (NT_SUCCESS(status))
                 NeedInvalidate = TRUE;
         }
     }
+
+    NeedInvalidate |= __FdoEnumerateVusbDevices(Fdo);
 
     __FdoReleaseMutex(Fdo);
 
@@ -3866,6 +4261,7 @@ FdoCreate(
 
     InitializeMutex(&Fdo->Mutex);
     InitializeListHead(&Dx->ListEntry);
+    InitializeListHead(&Fdo->VusbInstanceList);
     Fdo->References = 1;
 
     Info("%p (%s)\n",
