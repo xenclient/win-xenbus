@@ -49,6 +49,7 @@ extern PULONG   InitSafeBootMode;
 typedef struct _XEN_DRIVER {
     PLOG_DISPOSITION    TraceDisposition;
     PLOG_DISPOSITION    InfoDisposition;
+    PLOG_DISPOSITION    VciDisposition;
 } XEN_DRIVER, *PXEN_DRIVER;
 
 static XEN_DRIVER   Driver;
@@ -75,6 +76,7 @@ DriverOutputBuffer(
 
 #define XEN_PORT    0xE9
 #define QEMU_PORT   0x12
+#define VCI_QEMU_PORT 0x402
 
 NTSTATUS
 DllInitialize(
@@ -112,6 +114,15 @@ DllInitialize(
                                DriverOutputBuffer,
                                (PVOID)QEMU_PORT,
                                &Driver.InfoDisposition);
+    ASSERT(NT_SUCCESS(status));
+
+    status = LogAddDisposition(LOG_LEVEL_INFO |
+                               LOG_LEVEL_WARNING |
+                               LOG_LEVEL_ERROR |
+                               LOG_LEVEL_CRITICAL,
+                               DriverOutputBuffer,
+                               (PVOID)VCI_QEMU_PORT,
+                               &Driver.VciDisposition);
     ASSERT(NT_SUCCESS(status));
 
     Info("XEN %d.%d.%d (%d) (%02d.%02d.%04d)\n",
@@ -171,6 +182,9 @@ fail3:
 fail2:
     Error("fail2\n");
 
+    LogRemoveDisposition(Driver.VciDisposition);
+    Driver.VciDisposition = NULL;
+
     LogRemoveDisposition(Driver.InfoDisposition);
     Driver.InfoDisposition = NULL;
 
@@ -207,6 +221,9 @@ DllUnload(
 
     SystemTeardown();
 
+    LogRemoveDisposition(Driver.VciDisposition);
+    Driver.VciDisposition = NULL;
+    
     LogRemoveDisposition(Driver.InfoDisposition);
     Driver.InfoDisposition = NULL;
 
