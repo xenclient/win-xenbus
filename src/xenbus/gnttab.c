@@ -400,7 +400,11 @@ GnttabReference(
     )
 {
     UNREFERENCED_PARAMETER(Context);
-
+    //
+    // If the Descriptor is NULL, just return 0 for the ref
+    //
+    if (Descriptor == NULL)
+        return 0;
     return (ULONG)Descriptor->Reference;
 }
 
