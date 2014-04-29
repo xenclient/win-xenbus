@@ -920,9 +920,8 @@ __FdoEnumerateVusbDevices(
                         //
                         // The backend node is gone...not transitioned to state closing or closed.
                         //
-                        NeedInvalidate = TRUE;
-                        PdoSetDevicePnpState(VusbEntry->Pdo, Deleted);
-                        PdoDestroy(VusbEntry->Pdo);
+                        if (!PdoIsMissing(VusbEntry->Pdo))
+                            PdoSetMissing(VusbEntry->Pdo, "FDO surprise removed");
                     }
                     MakePdo = FALSE;
                     Found = TRUE;
