@@ -440,19 +440,17 @@ GnttabReference(
     )
 {
     UNREFERENCED_PARAMETER(Context);
-<<<<<<< HEAD
+
     //
     // If the Descriptor is NULL, just return 0 for the ref
     //
     if (Descriptor == NULL)
         return 0;
-=======
 
     ASSERT3U(Descriptor->Magic, ==, GNTTAB_DESCRIPTOR_MAGIC);
     ASSERT3U(Descriptor->Reference, >=, GNTTAB_RESERVED_ENTRY_COUNT);
     ASSERT3U(Descriptor->Reference, <, Context->FrameCount * GNTTAB_ENTRY_PER_FRAME);
 
->>>>>>> upstream/master
     return (ULONG)Descriptor->Reference;
 }
 
