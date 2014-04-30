@@ -41,22 +41,23 @@ RangeSetIsEmpty(
     IN  PXENBUS_RANGE_SET   RangeSet
     );
 
-extern ULONGLONG
+extern NTSTATUS
 RangeSetPop(
-    IN  PXENBUS_RANGE_SET   RangeSet
+    IN  PXENBUS_RANGE_SET   RangeSet,
+    OUT PLONGLONG           Item
     );
 
 extern NTSTATUS
 RangeSetGet(
     IN  PXENBUS_RANGE_SET   RangeSet,
-    IN  ULONGLONG           Item
+    IN  LONGLONG            Item
     );
 
 extern NTSTATUS
 RangeSetPut(
     IN  PXENBUS_RANGE_SET   RangeSet,
-    IN  ULONGLONG           Start,
-    IN  ULONGLONG           End
+    IN  LONGLONG            Start,
+    IN  LONGLONG            End
     );
 
 extern NTSTATUS
