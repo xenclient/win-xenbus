@@ -135,6 +135,21 @@ __UnplugPreamble(
     if (Magic != 0x49d2)
         goto fail1;
 
+    //
+    // XCE QEMU unplug protocol
+    //
+    WRITE_PORT_USHORT((PUSHORT)0x11, 0);    // Reset
+    WRITE_PORT_USHORT((PUSHORT)0x13, 2);    // Version
+    Version = READ_PORT_UCHAR((PUCHAR)0x12); // Get QEMU version
+    if (Version == 1) {                     // Check for XCE QEMU
+        LogPrintf(LOG_LEVEL_WARNING,
+            "UNPLUG: Detected version 1 QEMU Unplug protocol\n");
+        goto done;
+    }
+    //
+    // End of XCE QEMU unplug protocol
+    //
+
     Version = READ_PORT_UCHAR((PUCHAR)0x12);
     if (Version != 0) {
         WRITE_PORT_USHORT((PUSHORT)0x12, 0xFFFF);   // FIXME
