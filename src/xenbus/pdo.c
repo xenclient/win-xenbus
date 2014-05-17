@@ -2425,6 +2425,7 @@ PdoDestroy(
         if (Pdo->VusbListEntry)
         {
             FdoRemoveVusbEntry(Pdo->VusbListEntry);
+            Pdo->VusbListEntry = NULL;
         }
     }
     else
