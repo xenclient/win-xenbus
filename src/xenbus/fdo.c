@@ -900,6 +900,7 @@ __FdoEnumerateVusbDevices(
                         SurpriseRemovalsPending = TRUE;
                     } else {
                         Missing = FALSE;   // Present in Xenstore
+                        PdoSetDevicePnpState(VusbEntry->Pdo, Enumerated);
                     }
                 }
             }
